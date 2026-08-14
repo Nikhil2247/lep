@@ -70,6 +70,20 @@ cd /var/www/lep/laravel-app
 composer install --no-dev --optimize-autoloader
 ```
 
+`composer install` runs `artisan package:discover`, which needs
+`bootstrap/cache/` (and `storage/framework/{cache,sessions,views}`,
+`storage/logs`, `storage/app/public`) to already exist and be writable.
+Git doesn't track empty directories, so these are committed with a
+placeholder `.gitignore` file in each one specifically so `git clone`
+creates them for you — if `composer install` still fails with
+`"The .../bootstrap/cache directory must be present and writable"`, your
+clone predates that fix; `git pull` first, or run this once as a stopgap:
+
+```bash
+mkdir -p bootstrap/cache storage/framework/{cache,sessions,views} storage/logs storage/app/public
+composer install --no-dev --optimize-autoloader
+```
+
 For future updates, this becomes: `cd /var/www/lep && sudo git pull`, then
 re-run `composer install` if `composer.json` changed and `php artisan
 migrate` if new migrations were added.
