@@ -3,23 +3,26 @@
 > Same server/stack as your existing `almalinux_deployment_guide.md` for the
 > PHP app: AlmaLinux 8.10, Apache httpd (already running your Node.js +
 > PostgreSQL project too), php-fpm, MariaDB, SELinux enforcing. This guide
-> only covers the **delta** — what's new for the Laravel app — and reuses
-> your existing PHP 8.2/php-fpm/MariaDB install rather than repeating it.
+> covers the **delta** — what's new for the Laravel app — and reuses your
+> existing PHP 8.2/php-fpm/MariaDB install rather than repeating it.
 
-Your PHP app is already live at `nagaland.lep.2026.vibha.org`, served from
-`/var/www/lep`. The Laravel app ends up at that **exact same path** — same
-name, so the php-fpm pool/socket, SELinux contexts, and log paths you
-already have configured for `/var/www/lep` all keep working with zero
-changes. To get there without ever mixing the two codebases' files
-together, this builds/verifies Laravel in a throwaway staging folder first,
-then does a directory **swap** into `/var/www/lep` at cutover (old app
-renamed aside, not deleted — instant rollback).
+Deployed via `git clone` from `https://github.com/Nikhil2247/lep.git`
+(push your local commit first — `git push origin main` — the server can't
+clone what GitHub doesn't have yet). The old PHP app at `/var/www/lep` is
+removed entirely and replaced by the cloned repo at that same path, so the
+php-fpm pool/socket, SELinux context, and log paths you already have
+configured for `/var/www/lep` keep working with no new config.
+
+Because the repo root contains `laravel-app/` as a subfolder (alongside
+`.git`), the app itself lives one level down: **`/var/www/lep/laravel-app/`**,
+with `DocumentRoot` pointing at `/var/www/lep/laravel-app/public`.
 
 ## 0. What's different from the PHP deployment
 
 | Then (PHP) | Now (Laravel) |
 |---|---|
-| Document root = `/var/www/lep` | Document root = `/var/www/lep/public` (one path segment added) |
+| Files deployed via SCP | Files deployed via `git clone` / `git pull` |
+| Document root = `/var/www/lep` | Document root = `/var/www/lep/laravel-app/public` |
 | DB credentials in `config/config.php` | DB credentials in `.env` |
 | Evidence/project files on local disk under `uploads/` | Evidence/project files in **MinIO** (bucket `lep`) |
 | `master_import.php` / `export_submissions.php` — no auth | Same features, behind `/admin/login` |
@@ -32,43 +35,46 @@ uses. This is an application-layer migration, not a data migration.
 
 ## 1. Already done — nothing to do here
 
-Per your existing setup, these are already installed and running, so this
-guide skips them entirely:
+- PHP 8.2 + php-fpm (Remi repo), the `lep` pool at `/run/php-fpm/lep.sock` —
+  reused as-is. Confirm `gd` or `imagick` is present for Intervention Image:
+  `php -m | grep -iE 'gd|imagick'`; install with `sudo dnf install -y php-gd`
+  if missing, then `sudo systemctl restart php-fpm`.
+- MariaDB, `lep_nagaland` database, `lep_user` — reused as-is.
+- Apache httpd, SELinux enforcing, firewalld with 80/443 open, certbot.
 
-- PHP 8.2 + php-fpm (Remi repo) — Laravel needs the same extensions your PHP
-  app already required (`pdo_mysql`, `mbstring`, `zip`, `fileinfo`) plus
-  `gd` or `imagick` (Intervention Image — check with `php -m | grep -iE 'gd|imagick'`;
-  install with `sudo dnf install -y php-gd` if missing, then `sudo systemctl restart php-fpm`)
-- MariaDB, `lep_nagaland` database, `lep_user` — reused as-is
-- Apache httpd, SELinux enforcing, firewalld with 80/443 open, certbot
-- The `lep` php-fpm pool at `/run/php-fpm/lep.sock` — reused as-is, no new pool
-
-New requirement: **Composer 2**.
+New requirements: **git** and **Composer 2**.
 
 ```bash
+sudo dnf install -y git
 php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
 php composer-setup.php --install-dir=/usr/local/bin --filename=composer
 php -r "unlink('composer-setup.php');"
 composer --version
 ```
 
-## 2. Deploy the application files — to a staging path first
+## 2. Back up, then remove the old PHP app entirely
+
+A quick tar backup costs nothing and is your only safety net once the old
+files are gone — worth keeping even though the plan is a clean removal:
 
 ```bash
-sudo mkdir -p /var/www/lep-new
-# from your Windows machine, same pattern as your existing SCP step:
-# scp -r "D:\chrome download\LEP_V2\LEP_V2\laravel-app\*" your_user@your.server.ip:/tmp/lep_laravel_upload/
+sudo tar -czf /root/lep-php-backup-$(date +%F).tar.gz -C /var/www lep
+sudo rm -rf /var/www/lep
+```
 
-sudo cp -r /tmp/lep_laravel_upload/* /var/www/lep-new/
-cd /var/www/lep-new
+## 3. Clone the repo
+
+```bash
+sudo git clone https://github.com/Nikhil2247/lep.git /var/www/lep
+cd /var/www/lep/laravel-app
 composer install --no-dev --optimize-autoloader
 ```
 
-`/var/www/lep-new` is **temporary** — it only exists for the verification
-window in §7–8 and gets renamed to `/var/www/lep` at cutover (§9). Nothing
-below treats it as a permanent path.
+For future updates, this becomes: `cd /var/www/lep && sudo git pull`, then
+re-run `composer install` if `composer.json` changed and `php artisan
+migrate` if new migrations were added.
 
-## 3. Configure `.env`
+## 4. Configure `.env`
 
 ```bash
 cp .env.example .env
@@ -77,23 +83,18 @@ php artisan key:generate
 
 Edit `.env`:
 
-- `APP_URL=https://nagaland.lep.2026.vibha.org` — already set to the real
-  production domain in `.env.example`; leave it as-is even while testing on
-  the staging port (§7) — Laravel infers the actual root URL for
-  `asset()`/`url()` from the incoming request itself during normal web
-  requests, not from `APP_URL` (that config only matters for CLI/queue
-  contexts with no request to infer from), so assets load correctly on
-  `:8080` too without any extra config.
+- `APP_URL=https://nagaland.lep.2026.vibha.org` — already set correctly in
+  `.env.example`.
 - `DB_HOST=localhost`, `DB_DATABASE=lep_nagaland`, `DB_USERNAME=lep_user`,
   `DB_PASSWORD=` — the **same** credentials your PHP app's `config/config.php`
-  already uses.
+  used.
 - `MINIO_*` — endpoint/key/secret/bucket for the `lep` bucket you already set up.
 - `LEP_ADMIN_EMAIL` / `LEP_ADMIN_PASSWORD` / `LEP_ADMIN_NAME` — the one admin
   account for `/admin/*`.
-- `SESSION_SECURE_COOKIE` — set to `false` for now (§7's staging vhost is
-  plain HTTP); flip to `true` at cutover (§9).
+- `SESSION_SECURE_COOKIE=true` (you're going straight to the live HTTPS vhost
+  in this flow, no separate HTTP staging step).
 
-## 4. Database — one migration file, two seeders
+## 5. Database — one migration file, two seeders
 
 Unlike the old `LEP_V2_Production.sql` (schema + data in one script, meant
 for a fresh install only), this is split cleanly:
@@ -132,16 +133,9 @@ for a fresh install only), this is split cleanly:
   php artisan db:seed --class=AdminUserSeeder
   ```
 
-  Or all three at once via `database/seeders/DatabaseSeeder.php`:
+  Or all three at once: `php artisan db:seed`.
 
-  ```bash
-  php artisan db:seed
-  ```
-
-This step is safe to run now, against production, from `/var/www/lep-new` —
-the DB connection doesn't care which directory the app files live in.
-
-## 5. Move content into MinIO
+## 6. Move content into MinIO
 
 Two sets of real files need to land in your `lep` bucket, keeping the
 **exact same object-key shape as the existing DB values** (`projects.project_file`
@@ -155,35 +149,37 @@ in this repo — 17 official Cycle 1 documents):
 mc mirror storage/app/minio-migration/uploads/projects myminio/lep/uploads/projects
 ```
 
-**b) Evidence files already submitted through the live PHP app** — these
-live on the server under `/var/www/lep/uploads/evidence/` (the PHP app's
-current, still-live path), not in this repo:
+**b) Evidence files already submitted through the live PHP app** — recover
+these from the backup tarball made in §2, since the live `uploads/` folder
+is gone now:
 
 ```bash
-mc mirror /var/www/lep/uploads/evidence myminio/lep/uploads/evidence
+sudo tar -xzf /root/lep-php-backup-$(date +%F).tar.gz -C /tmp lep/uploads/evidence
+mc mirror /tmp/lep/uploads/evidence myminio/lep/uploads/evidence
 ```
 
-If no submissions have come in yet, skip this. (This path stays valid right
-up until the §9 swap, since `/var/www/lep` still holds the live PHP app
-until then.)
+If no submissions had come in yet, skip this.
 
-## 6. Permissions & SELinux (staging path)
+## 7. Permissions & SELinux
 
 ```bash
-sudo chown -R apache:apache /var/www/lep-new
-sudo find /var/www/lep-new -type d -exec chmod 755 {} \;
-sudo find /var/www/lep-new -type f -exec chmod 644 {} \;
+sudo chown -R apache:apache /var/www/lep
+sudo find /var/www/lep -type d -exec chmod 755 {} \;
+sudo find /var/www/lep -type f -exec chmod 644 {} \;
 
-sudo chmod -R 775 /var/www/lep-new/storage /var/www/lep-new/bootstrap/cache
-sudo chown -R apache:apache /var/www/lep-new/storage /var/www/lep-new/bootstrap/cache
+sudo chmod -R 775 /var/www/lep/laravel-app/storage /var/www/lep/laravel-app/bootstrap/cache
+sudo chown -R apache:apache /var/www/lep/laravel-app/storage /var/www/lep/laravel-app/bootstrap/cache
 
-# Temporary SELinux rule for the staging path only - see §9 for why the
-# final /var/www/lep path needs no new rule at all.
-sudo semanage fcontext -a -t httpd_sys_content_t "/var/www/lep-new(/.*)?"
-sudo restorecon -Rv /var/www/lep-new
-sudo semanage fcontext -a -t httpd_sys_rw_content_t "/var/www/lep-new/storage(/.*)?"
-sudo semanage fcontext -a -t httpd_sys_rw_content_t "/var/www/lep-new/bootstrap/cache(/.*)?"
-sudo restorecon -Rv /var/www/lep-new/storage /var/www/lep-new/bootstrap/cache
+# Same path pattern your PHP app already had a rule for - restorecon just
+# needs to relabel the freshly-cloned content, no new semanage rule needed
+# for /var/www/lep itself.
+sudo restorecon -Rv /var/www/lep
+
+# storage/ and bootstrap/cache/ are new writable subpaths that didn't exist
+# under the PHP app, so these two new rules are needed:
+sudo semanage fcontext -a -t httpd_sys_rw_content_t "/var/www/lep/laravel-app/storage(/.*)?"
+sudo semanage fcontext -a -t httpd_sys_rw_content_t "/var/www/lep/laravel-app/bootstrap/cache(/.*)?"
+sudo restorecon -Rv /var/www/lep/laravel-app/storage /var/www/lep/laravel-app/bootstrap/cache
 
 # Already enabled for the PHP app, but confirm:
 sudo setsebool -P httpd_can_network_connect_db 1
@@ -195,138 +191,68 @@ If MinIO is reached over the network (not `localhost`), also:
 sudo setsebool -P httpd_can_network_connect 1
 ```
 
-## 7. Apache VirtualHost — staging only
+## 8. Update the Apache VirtualHost
 
-Your live vhosts (`:80` and `:443`, both `ServerName nagaland.lep.2026.vibha.org`,
-`DocumentRoot /var/www/lep`) are untouched in this step. Staging uses the
-**same hostname on port 8080** instead — no DNS or extra cert needed, and
-nothing here conflicts with the live site:
-
-```bash
-sudo nano /etc/httpd/conf.d/lep-staging.conf
-```
-
-```apache
-<VirtualHost *:8080>
-    ServerName nagaland.lep.2026.vibha.org
-    DocumentRoot /var/www/lep-new/public
-
-    <Directory /var/www/lep-new/public>
-        Options -Indexes +FollowSymLinks
-        AllowOverride All
-        Require all granted
-
-        <FilesMatch \.php$>
-            SetHandler "proxy:unix:/run/php-fpm/lep.sock|fcgi://localhost"
-        </FilesMatch>
-    </Directory>
-
-    ErrorLog  /var/log/httpd/lep-staging_error.log
-    CustomLog /var/log/httpd/lep-staging_access.log combined
-</VirtualHost>
-```
-
-```bash
-sudo firewall-cmd --permanent --add-port=8080/tcp
-sudo firewall-cmd --reload
-sudo apachectl configtest
-sudo systemctl reload httpd
-```
-
-This staging vhost, `lep-staging.conf`, and the `8080` firewall rule are all
-deleted in §9 — none of it persists past cutover.
-
-## 8. Verify before cutover
-
-Against `http://nagaland.lep.2026.vibha.org:8080/`, work through
-`README.md`'s verification checklist — form submission, cascading
-dropdowns, evidence upload + compression, project download, certificate
-rendering — and confirm `/admin/export` and `/admin/master-import` now
-require login (they didn't before). Also check:
-
-```bash
-sudo tail -f /var/log/httpd/lep-staging_error.log
-sudo tail -f /var/www/lep-new/storage/logs/laravel.log
-```
-
-## 9. Cutover — swap the directory, edit two lines
-
-Once verified, this is the entire cutover:
-
-```bash
-# 1. Tear down staging
-sudo rm /etc/httpd/conf.d/lep-staging.conf
-sudo firewall-cmd --permanent --remove-port=8080/tcp
-sudo firewall-cmd --reload
-
-# 2. Swap directories (old app renamed aside, not deleted - instant rollback)
-sudo mv /var/www/lep /var/www/lep-legacy-backup
-sudo mv /var/www/lep-new /var/www/lep
-
-# 3. Re-apply the SAME SELinux path rule your PHP app already had -
-#    no new semanage rule needed, the pattern "/var/www/lep(/.*)?" is
-#    unchanged, restorecon just needs to relabel the new contents.
-sudo restorecon -Rv /var/www/lep
-sudo semanage fcontext -a -t httpd_sys_rw_content_t "/var/www/lep/storage(/.*)?"
-sudo semanage fcontext -a -t httpd_sys_rw_content_t "/var/www/lep/bootstrap/cache(/.*)?"
-sudo restorecon -Rv /var/www/lep/storage /var/www/lep/bootstrap/cache
-```
-
-Then edit `.env` (now at `/var/www/lep/.env`): set `SESSION_SECURE_COOKIE=true`.
-
-Last step — the **only** vhost edit, in `/etc/httpd/conf.d/lep-vhost.conf`
-(your existing `:80` config). Certbot typically writes the matching `:443`
-vhost to a sibling file named `lep-vhost-le-ssl.conf` in the same
-`conf.d/` directory — check for it and apply the identical change there too:
+Edit `/etc/httpd/conf.d/lep-vhost.conf` (your existing `:80` config).
+Certbot typically writes the matching `:443` vhost to a sibling file named
+`lep-vhost-le-ssl.conf` in the same `conf.d/` directory — check for it and
+apply the identical change there too:
 
 ```diff
 -    DocumentRoot /var/www/lep
-+    DocumentRoot /var/www/lep/public
++    DocumentRoot /var/www/lep/laravel-app/public
 
 -    <Directory /var/www/lep>
-+    <Directory /var/www/lep/public>
++    <Directory /var/www/lep/laravel-app/public>
 ```
 
-And remove the now-unused `<Directory /var/www/lep/uploads>` block — MinIO
-means Laravel never writes user-uploaded files under the document root, so
-there's nothing there left to block execution on.
+Remove the now-unused `<Directory /var/www/lep/uploads>` block entirely —
+MinIO means Laravel never writes user-uploaded files under the document
+root, so there's nothing there left to block execution on.
 
 ```bash
 sudo apachectl configtest
 sudo systemctl reload httpd
 ```
 
-That's it — same directory name, same php-fpm socket, same SELinux base
-rule, same log filenames, only `DocumentRoot`/`<Directory>` gained
-`/public` and the `uploads/` block was removed.
+## 9. Verify
 
-Watch `/var/www/lep/storage/logs/laravel.log` for the first real traffic.
-After a few days of clean operation, `/var/www/lep-legacy-backup` can be
-archived/removed.
-
-## 10. Rollback
+Visit `https://nagaland.lep.2026.vibha.org/` and work through `README.md`'s
+verification checklist — form submission, cascading dropdowns, evidence
+upload + compression, project download, certificate rendering — and confirm
+`/admin/export` and `/admin/master-import` now require login (they didn't
+before).
 
 ```bash
-sudo mv /var/www/lep /var/www/lep-laravel-failed
-sudo mv /var/www/lep-legacy-backup /var/www/lep
+sudo tail -f /var/log/httpd/lep_error.log
+sudo tail -f /var/www/lep/laravel-app/storage/logs/laravel.log
+```
+
+If something's broken, see Rollback below before teachers start using it —
+once real submissions start landing in the live DB, rolling back to the PHP
+app is still safe (nothing existing was altered), but any evidence uploaded
+through the Laravel app in the meantime lives in MinIO, not the PHP app's
+local `uploads/`, so the PHP app won't be able to see it.
+
+## Rollback
+
+```bash
+sudo rm -rf /var/www/lep
+sudo mkdir -p /var/www/lep
+sudo tar -xzf /root/lep-php-backup-$(date +%F).tar.gz -C /var/www lep --strip-components=1
 sudo restorecon -Rv /var/www/lep
 ```
 
 Then revert the `DocumentRoot`/`<Directory>` edit in both vhosts back to
-`/var/www/lep` (no `/public`), restore the `uploads/` `<Directory>` block,
-and reload Apache. The database wasn't touched destructively by this
-migration (only new tables were added via the guarded migration; nothing
-existing was altered), so the PHP app keeps working exactly as it did
-before.
+`/var/www/lep` (no `/laravel-app/public`), restore the `uploads/`
+`<Directory>` block, and reload Apache.
 
 ## Troubleshooting
-
-Same first moves as your PHP app's guide:
 
 ```bash
 # 500 errors
 sudo tail -f /var/log/httpd/lep_error.log
-sudo tail -f /var/www/lep/storage/logs/laravel.log
+sudo tail -f /var/www/lep/laravel-app/storage/logs/laravel.log
 
 # Permission/SELinux denials
 sudo ausearch -c httpd --raw | audit2why
@@ -337,4 +263,7 @@ ls -la /run/php-fpm/lep.sock
 
 # MariaDB connection
 mysql -u lep_user -p -e "SELECT 1;"
+
+# git clone/pull auth issues (private repo)
+git config --global credential.helper store   # or set up a deploy key instead
 ```
