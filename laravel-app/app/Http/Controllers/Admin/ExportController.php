@@ -75,22 +75,34 @@ class ExportController extends Controller
             throw new RuntimeException('No submissions found to export.');
         }
 
+        // Batch-fetch tasks/evidence for every submission up front instead of
+        // 2 extra queries per row - avoids an N+1 that scaled with submission count.
+        $submissionIds = $submissions->pluck('db_id');
+
+        $tasksBySubmission = DB::table('task_responses as tr')
+            ->join('project_tasks as pt', 'pt.id', '=', 'tr.task_id')
+            ->whereIn('tr.submission_id', $submissionIds)
+            ->orderBy('pt.sort_order')->orderBy('pt.task_number')->orderBy('pt.id')
+            ->select(['tr.submission_id', 'pt.task_number', 'pt.task_type', 'pt.task_description', 'tr.completed'])
+            ->get()
+            ->groupBy('submission_id');
+
+        $filesBySubmission = DB::table('submission_evidence')
+            ->whereIn('submission_id', $submissionIds)
+            ->orderBy('id')
+            ->select(['submission_id', 'original_name'])
+            ->get()
+            ->groupBy('submission_id');
+
         $rowsData = [];
         $maxTasks = 0;
 
         foreach ($submissions as $sub) {
-            $tasks = DB::table('task_responses as tr')
-                ->join('project_tasks as pt', 'pt.id', '=', 'tr.task_id')
-                ->where('tr.submission_id', $sub->db_id)
-                ->orderBy('pt.sort_order')->orderBy('pt.task_number')->orderBy('pt.id')
-                ->select(['pt.task_number', 'pt.task_type', 'pt.task_description', 'tr.completed'])
-                ->get();
+            $tasks = $tasksBySubmission->get($sub->db_id, collect())->values();
 
             $maxTasks = max($maxTasks, $tasks->count());
 
-            $files = DB::table('submission_evidence')
-                ->where('submission_id', $sub->db_id)
-                ->orderBy('id')
+            $files = $filesBySubmission->get($sub->db_id, collect())
                 ->pluck('original_name')
                 ->map(fn ($name) => trim((string) $name))
                 ->filter(fn ($name) => $name !== '')
@@ -219,7 +231,11 @@ class ExportController extends Controller
                 continue;
             }
 
-            if (! $disk->exists($key)) {
+            // Skip straight to get() instead of exists()+get() - halves the
+            // MinIO round trips per file; a missing object just throws here.
+            try {
+                $contents = $disk->get($key);
+            } catch (Throwable $e) {
                 continue;
             }
 
@@ -246,7 +262,7 @@ class ExportController extends Controller
             }
 
             $entry = $sid.'/'.$original;
-            if ($zip->addFromString($entry, $disk->get($key))) {
+            if ($zip->addFromString($entry, $contents)) {
                 $added++;
             }
         }

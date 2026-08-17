@@ -51,8 +51,8 @@ class SubmissionController extends Controller
         $videoLink = trim((string) $request->input('project_video_link', ''));
         $files = array_values(array_filter((array) $request->file('project_evidence', [])));
 
-        $submissionCode = DB::transaction(function () use (
-            $request, $subjectId, $taskCompleted, $videoLink, $files, $evidence
+        [$submission, $submissionCode] = DB::transaction(function () use (
+            $request, $subjectId, $taskCompleted, $videoLink
         ) {
             $submissionCode = $this->generateSubmissionId();
 
@@ -79,19 +79,22 @@ class SubmissionController extends Controller
                 ]);
             }
 
-            foreach ($files as $index => $file) {
-                $ext = strtolower((string) pathinfo($file->getClientOriginalName(), PATHINFO_EXTENSION));
-                $path = $evidence->store($file, $ext, $submissionCode, $index);
-
-                SubmissionEvidence::create([
-                    'submission_id' => $submission->id,
-                    'file_path' => $path,
-                    'original_name' => $file->getClientOriginalName(),
-                ]);
-            }
-
-            return $submissionCode;
+            return [$submission, $submissionCode];
         });
+
+        // Compression + MinIO upload happen outside the DB transaction - these
+        // are network/CPU bound and previously held a MySQL transaction open
+        // for their whole duration, slowing every other request on the pool.
+        foreach ($files as $index => $file) {
+            $ext = strtolower((string) pathinfo($file->getClientOriginalName(), PATHINFO_EXTENSION));
+            $path = $evidence->store($file, $ext, $submissionCode, $index);
+
+            SubmissionEvidence::create([
+                'submission_id' => $submission->id,
+                'file_path' => $path,
+                'original_name' => $file->getClientOriginalName(),
+            ]);
+        }
 
         return redirect()->route('home')->with('success', $submissionCode);
     }

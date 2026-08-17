@@ -2,16 +2,20 @@
 
 > Same server/stack as your existing `almalinux_deployment_guide.md` for the
 > PHP app: AlmaLinux 8.10, Apache httpd (already running your Node.js +
-> PostgreSQL project too), php-fpm, MariaDB, SELinux enforcing. This guide
-> covers the **delta** — what's new for the Laravel app — and reuses your
-> existing PHP 8.2/php-fpm/MariaDB install rather than repeating it.
+> PostgreSQL project too), php-fpm, MariaDB. This guide covers the
+> **delta** — what's new for the Laravel app — and reuses your existing
+> PHP 8.2/php-fpm/MariaDB install rather than repeating it. SELinux is
+> **disabled** on this server (confirmed via `getenforce`), so this guide
+> has no SELinux steps at all — if you ever re-enable it, you'll need to
+> label `/var/www/lep` and its writable `storage`/`bootstrap/cache`
+> subpaths as `httpd_sys_content_t`/`httpd_sys_rw_content_t` yourself.
 
 Deployed via `git clone` from `https://github.com/Nikhil2247/lep.git`
 (push your local commit first — `git push origin main` — the server can't
 clone what GitHub doesn't have yet). The old PHP app at `/var/www/lep` is
 removed entirely and replaced by the cloned repo at that same path, so the
-php-fpm pool/socket, SELinux context, and log paths you already have
-configured for `/var/www/lep` keep working with no new config.
+php-fpm pool/socket and log paths you already have configured for
+`/var/www/lep` keep working with no new config.
 
 Because the repo root contains `laravel-app/` as a subfolder (alongside
 `.git`), the app itself lives one level down: **`/var/www/lep/laravel-app/`**,
@@ -40,7 +44,7 @@ uses. This is an application-layer migration, not a data migration.
   `php -m | grep -iE 'gd|imagick'`; install with `sudo dnf install -y php-gd`
   if missing, then `sudo systemctl restart php-fpm`.
 - MariaDB, `lep_nagaland` database, `lep_user` — reused as-is.
-- Apache httpd, SELinux enforcing, firewalld with 80/443 open, certbot.
+- Apache httpd, firewalld with 80/443 open, certbot. SELinux is disabled.
 
 New requirements: **git** and **Composer 2**.
 
@@ -174,36 +178,29 @@ mc mirror /tmp/lep/uploads/evidence myminio/lep/uploads/evidence
 
 If no submissions had come in yet, skip this.
 
-## 7. Permissions & SELinux
+## 7. Permissions
+
+Uses a dedicated `lep` system user/group instead of the shared `apache`
+account, to keep this app's files isolated from your other Apache-served
+projects on this box. This only works at runtime if the php-fpm pool
+serving `/run/php-fpm/lep.sock` also runs as `user = lep` / `group = lep`
+(check `/etc/php-fpm.d/lep.conf`) — if that pool still runs as `apache`,
+either update it to `lep`, or add `apache` to the `lep` group
+(`sudo usermod -aG lep apache`) so it can still read/write these files.
 
 ```bash
-sudo chown -R apache:apache /var/www/lep
+sudo chown -R lep:lep /var/www/lep
 sudo find /var/www/lep -type d -exec chmod 755 {} \;
 sudo find /var/www/lep -type f -exec chmod 644 {} \;
 
 sudo chmod -R 775 /var/www/lep/laravel-app/storage /var/www/lep/laravel-app/bootstrap/cache
-sudo chown -R apache:apache /var/www/lep/laravel-app/storage /var/www/lep/laravel-app/bootstrap/cache
-
-# Same path pattern your PHP app already had a rule for - restorecon just
-# needs to relabel the freshly-cloned content, no new semanage rule needed
-# for /var/www/lep itself.
-sudo restorecon -Rv /var/www/lep
-
-# storage/ and bootstrap/cache/ are new writable subpaths that didn't exist
-# under the PHP app, so these two new rules are needed:
-sudo semanage fcontext -a -t httpd_sys_rw_content_t "/var/www/lep/laravel-app/storage(/.*)?"
-sudo semanage fcontext -a -t httpd_sys_rw_content_t "/var/www/lep/laravel-app/bootstrap/cache(/.*)?"
-sudo restorecon -Rv /var/www/lep/laravel-app/storage /var/www/lep/laravel-app/bootstrap/cache
-
-# Already enabled for the PHP app, but confirm:
-sudo setsebool -P httpd_can_network_connect_db 1
+sudo chown -R lep:lep /var/www/lep/laravel-app/storage /var/www/lep/laravel-app/bootstrap/cache
 ```
 
-If MinIO is reached over the network (not `localhost`), also:
-
-```bash
-sudo setsebool -P httpd_can_network_connect 1
-```
+(No SELinux labeling needed — confirmed disabled on this server. If you
+ever turn it on, `storage/` and `bootstrap/cache/` are the two paths that
+would need `httpd_sys_rw_content_t`; everything else stays
+`httpd_sys_content_t`.)
 
 ## 8. Update the Apache VirtualHost
 
@@ -254,7 +251,6 @@ local `uploads/`, so the PHP app won't be able to see it.
 sudo rm -rf /var/www/lep
 sudo mkdir -p /var/www/lep
 sudo tar -xzf /root/lep-php-backup-$(date +%F).tar.gz -C /var/www lep --strip-components=1
-sudo restorecon -Rv /var/www/lep
 ```
 
 Then revert the `DocumentRoot`/`<Directory>` edit in both vhosts back to
@@ -267,9 +263,6 @@ Then revert the `DocumentRoot`/`<Directory>` edit in both vhosts back to
 # 500 errors
 sudo tail -f /var/log/httpd/lep_error.log
 sudo tail -f /var/www/lep/laravel-app/storage/logs/laravel.log
-
-# Permission/SELinux denials
-sudo ausearch -c httpd --raw | audit2why
 
 # php-fpm socket
 sudo systemctl status php-fpm
