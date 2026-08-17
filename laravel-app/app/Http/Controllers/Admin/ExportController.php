@@ -39,7 +39,7 @@ class ExportController extends Controller
         }
     }
 
-    public function evidenceZip(): StreamedResponse|RedirectResponse
+    public function evidenceZip(): RedirectResponse
     {
         try {
             return $this->streamEvidenceZip();
@@ -184,7 +184,7 @@ class ExportController extends Controller
         ]);
     }
 
-    private function streamEvidenceZip(): StreamedResponse
+    private function streamEvidenceZip(): RedirectResponse
     {
         if (! class_exists(ZipArchive::class)) {
             throw new RuntimeException(
@@ -278,12 +278,25 @@ class ExportController extends Controller
 
         $filename = 'LEP_All_Evidence_'.now()->format('Y-m-d').'.zip';
 
-        return response()->streamDownload(function () use ($zipPath) {
-            readfile($zipPath);
-            @unlink($zipPath);
-        }, $filename, [
-            'Content-Type' => 'application/zip',
-            'Cache-Control' => 'max-age=0, no-cache, must-revalidate, private',
+        // Push the freshly-built ZIP to MinIO and redirect there instead of
+        // streaming it back through php-fpm - the admin's browser then pulls
+        // it straight from MinIO, same as project downloads. The export key
+        // is unique per request (rebuilt fresh every time, as chosen) and
+        // expires in 30 minutes; a bucket lifecycle rule on the exports/
+        // prefix is recommended so these temporary objects don't accumulate.
+        $exportKey = 'exports/evidence/'.now()->format('Ymd_His').'_'.bin2hex(random_bytes(4)).'.zip';
+
+        $stream = fopen($zipPath, 'r');
+        $disk->put($exportKey, $stream);
+        if (is_resource($stream)) {
+            fclose($stream);
+        }
+        @unlink($zipPath);
+
+        $url = $disk->temporaryUrl($exportKey, now()->addMinutes(30), [
+            'ResponseContentDisposition' => 'attachment; filename="'.$filename.'"',
         ]);
+
+        return redirect()->away($url);
     }
 }

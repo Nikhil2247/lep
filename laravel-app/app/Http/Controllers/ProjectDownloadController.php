@@ -3,8 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Models\Project;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Facades\Storage;
-use Symfony\Component\HttpFoundation\StreamedResponse;
+use Throwable;
 
 /**
  * Ports download_project.php - project PDFs now live in MinIO (the 'minio'
@@ -17,7 +18,7 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
  */
 class ProjectDownloadController extends Controller
 {
-    public function show(int $id): StreamedResponse
+    public function show(int $id): RedirectResponse
     {
         $project = Project::where('id', $id)->where('is_active', 1)->first();
 
@@ -34,15 +35,22 @@ class ProjectDownloadController extends Controller
         }
 
         $disk = Storage::disk('minio');
+        $filename = basename($key);
 
-        if (! $disk->exists($key)) {
+        // MinIO is reachable on a public URL, so redirect straight to a
+        // short-lived signed link instead of proxying the file through
+        // php-fpm - the browser downloads from MinIO directly, which is far
+        // faster than streaming the whole file through a PHP worker. Access
+        // stays controlled: the link is only generated after the is_active/
+        // path checks above, and expires in 5 minutes.
+        try {
+            $url = $disk->temporaryUrl($key, now()->addMinutes(5), [
+                'ResponseContentDisposition' => 'attachment; filename="'.$filename.'"',
+            ]);
+        } catch (Throwable $e) {
             abort(404, 'File is missing on the server. Please contact the administrator.');
         }
 
-        $filename = basename($key);
-
-        return $disk->download($key, $filename, [
-            'X-Content-Type-Options' => 'nosniff',
-        ]);
+        return redirect()->away($url);
     }
 }
