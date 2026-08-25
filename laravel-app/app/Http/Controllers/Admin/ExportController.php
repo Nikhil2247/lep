@@ -111,23 +111,9 @@ class ExportController extends Controller
             $rowsData[] = ['sub' => $sub, 'tasks' => $tasks, 'files' => $files];
         }
 
-        $taskHeaders = [];
+               $taskHeaders = [];
         for ($i = 0; $i < $maxTasks; $i++) {
-            $label = 'Task '.($i + 1);
-            foreach ($rowsData as $rd) {
-                if (! isset($rd['tasks'][$i])) {
-                    continue;
-                }
-                $tt = $rd['tasks'][$i]->task_type ?? 'Task';
-                if ($tt === 'Showcase') {
-                    $label = 'Showcase';
-
-                    break;
-                }
-                $num = (int) ($rd['tasks'][$i]->task_number ?? ($i + 1));
-                $label = 'Task '.$num;
-            }
-            $taskHeaders[] = $label;
+            $taskHeaders[] = 'Task '.($i + 1);
         }
 
         $header = [
