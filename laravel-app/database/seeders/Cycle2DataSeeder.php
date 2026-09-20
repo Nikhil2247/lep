@@ -55,23 +55,81 @@ class Cycle2DataSeeder extends Seeder
     }
 
     /**
+     * Splits a SQL script into individual statements. Unlike a naive
+     * explode(';', ...), this tracks `--`/`#` line comments and quoted
+     * strings so a semicolon inside a comment sentence (e.g. "... exceed
+     * that; an unexpanded ...") or inside a string literal never produces
+     * a bogus statement boundary.
+     *
      * @return string[]
      */
     private function splitStatements(string $sql): array
     {
         $statements = [];
+        $current = '';
+        $length = strlen($sql);
+        $inSingle = false;
+        $inDouble = false;
 
-        foreach (explode(';', $sql) as $chunk) {
-            $chunk = trim($chunk);
+        for ($i = 0; $i < $length; $i++) {
+            $char = $sql[$i];
 
-            // Skip chunks that are empty or contain only `--` comment lines.
-            $meaningful = trim(preg_replace('/^\s*--.*$/m', '', $chunk));
+            if (! $inSingle && ! $inDouble && $char === '-' && ($sql[$i + 1] ?? '') === '-') {
+                $eol = strpos($sql, "\n", $i);
+                $i = ($eol === false ? $length : $eol) - 1;
 
-            if ($meaningful === '') {
                 continue;
             }
 
-            $statements[] = $chunk;
+            if (! $inSingle && ! $inDouble && $char === '#') {
+                $eol = strpos($sql, "\n", $i);
+                $i = ($eol === false ? $length : $eol) - 1;
+
+                continue;
+            }
+
+            if (! $inDouble && $char === "'") {
+                if ($inSingle && ($sql[$i + 1] ?? '') === "'") {
+                    $current .= "''";
+                    $i++;
+
+                    continue;
+                }
+                $inSingle = ! $inSingle;
+                $current .= $char;
+
+                continue;
+            }
+
+            if (! $inSingle && $char === '"') {
+                if ($inDouble && ($sql[$i + 1] ?? '') === '"') {
+                    $current .= '""';
+                    $i++;
+
+                    continue;
+                }
+                $inDouble = ! $inDouble;
+                $current .= $char;
+
+                continue;
+            }
+
+            if (! $inSingle && ! $inDouble && $char === ';') {
+                $trimmed = trim($current);
+                if ($trimmed !== '') {
+                    $statements[] = $trimmed;
+                }
+                $current = '';
+
+                continue;
+            }
+
+            $current .= $char;
+        }
+
+        $trimmed = trim($current);
+        if ($trimmed !== '') {
+            $statements[] = $trimmed;
         }
 
         return $statements;
