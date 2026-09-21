@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\Cycle;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 use Intervention\Image\Drivers\Gd\Driver as GdDriver;
@@ -56,19 +57,20 @@ class EvidenceUploadService
     }
 
     /**
-     * Compress (if an image) and push a validated file to MinIO under
-     * uploads/evidence/{submission_id}/. Returns the stored object key.
+     * Compress (if an image) and push a validated file to MinIO under this
+     * cycle's evidence prefix. Returns the stored object key.
      *
-     * The 'uploads/evidence/' prefix matches the legacy saveEvidenceFile()
-     * convention (includes/functions.php) - any submission_evidence rows
-     * that already exist in the production DB store file_path values in
-     * that exact shape, so new rows keep using it too.
+     * Cycle 1 keeps the legacy 'uploads/evidence/' prefix (saveEvidenceFile()
+     * in the old includes/functions.php) - existing submission_evidence rows
+     * already store file_path values in that exact shape. Cycle 2 onward use
+     * 'uploads/cycle-{n}/evidence/' instead, so each cycle's evidence lives
+     * in its own MinIO folder. See evidencePrefix().
      */
-    public function store(UploadedFile $file, string $ext, string $submissionCode, int $index): string
+    public function store(UploadedFile $file, string $ext, string $submissionCode, int $index, Cycle $cycle): string
     {
         $folder = preg_replace('/[^A-Za-z0-9\-]/', '', $submissionCode);
         $safeName = 'evidence_'.($index + 1).'_'.bin2hex(random_bytes(4)).'.'.$ext;
-        $key = "uploads/evidence/{$folder}/{$safeName}";
+        $key = $this->evidencePrefix($cycle)."/{$folder}/{$safeName}";
 
         $contents = in_array($ext, config('lep.compressible_image_extensions'), true)
             ? $this->compress($file, $ext)
@@ -77,6 +79,24 @@ class EvidenceUploadService
         Storage::disk('minio')->put($key, $contents, ['visibility' => 'private']);
 
         return $key;
+    }
+
+    /**
+     * Cycle 1 -> 'uploads/evidence' (unchanged, matches existing rows).
+     * Cycle 2, 3, ... -> 'uploads/cycle-{n}/evidence', derived from the
+     * cycle's name (e.g. "Cycle 2" -> 2) so a future Cycle 3 needs no code
+     * change here.
+     */
+    private function evidencePrefix(Cycle $cycle): string
+    {
+        if ($cycle->name === 'Cycle 1') {
+            return 'uploads/evidence';
+        }
+
+        $number = preg_replace('/[^0-9]/', '', $cycle->name);
+        $number = $number !== '' ? $number : (string) $cycle->id;
+
+        return "uploads/cycle-{$number}/evidence";
     }
 
     private function compress(UploadedFile $file, string $ext): string

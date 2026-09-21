@@ -213,7 +213,9 @@ class ExportController extends Controller
             }
 
             $key = ltrim(str_replace('\\', '/', (string) $row->file_path), '/');
-            if ($key === '' || str_contains($key, '..') || ! str_starts_with($key, 'uploads/evidence/')) {
+            $isKnownEvidencePrefix = str_starts_with($key, 'uploads/evidence/')
+                || (bool) preg_match('#^uploads/cycle-\d+/evidence/#', $key);
+            if ($key === '' || str_contains($key, '..') || ! $isKnownEvidencePrefix) {
                 continue;
             }
 

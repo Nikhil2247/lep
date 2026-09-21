@@ -46,6 +46,7 @@ class SubmissionController extends Controller
         $grade = Grade::findOrFail($request->input('grade_id'));
         $isSchoolLeader = (bool) $grade->is_school_leader;
         $subjectId = $isSchoolLeader ? null : $request->input('subject_id');
+        $cycle = Cycle::findOrFail($request->input('cycle_id'));
 
         $taskCompleted = (array) $request->input('task_completed', []);
         $videoLink = trim((string) $request->input('project_video_link', ''));
@@ -87,7 +88,7 @@ class SubmissionController extends Controller
         // for their whole duration, slowing every other request on the pool.
         foreach ($files as $index => $file) {
             $ext = strtolower((string) pathinfo($file->getClientOriginalName(), PATHINFO_EXTENSION));
-            $path = $evidence->store($file, $ext, $submissionCode, $index);
+            $path = $evidence->store($file, $ext, $submissionCode, $index, $cycle);
 
             SubmissionEvidence::create([
                 'submission_id' => $submission->id,
