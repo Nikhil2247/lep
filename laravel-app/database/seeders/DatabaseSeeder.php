@@ -11,6 +11,7 @@ class DatabaseSeeder extends Seeder
         $this->call([
             ReferenceDataSeeder::class,
             Cycle2DataSeeder::class,
+            Cycle3DataSeeder::class,
             SchoolMasterDataSeeder::class,
             AdminUserSeeder::class,
         ]);
